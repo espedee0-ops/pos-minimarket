@@ -1,0 +1,85 @@
+/* Pengaturan Dasar & Optimasi Layar Sentuh HP/Tablet */
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background-color: #f1f5f9;
+  color: #0f172a;
+  overscroll-behavior-y: contain;
+}
+
+/* Mencegah zoom tidak sengaja saat kasir menekan tombol cepat */
+button,
+input,
+select,
+textarea {
+  touch-action: manipulation;
+}
+
+/* Scrollbar rapi untuk daftar produk dan keranjang */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Animasi getar halus jika PIN salah */
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-8px); }
+  40%, 80% { transform: translateX(8px); }
+}
+
+.animate-shake {
+  animation: shake 0.35s ease-in-out;
+}
+
+/* Ruang aman untuk navigasi bawah di HP modern */
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0.5rem);
+}
+
+/* Gaya font struk kasir */
+.receipt-paper {
+  font-family: "Courier New", Courier, monospace;
+}
+
+/* Pengaturan saat mencetak struk melalui browser */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  #printable-receipt,
+  #printable-receipt * {
+    visibility: visible;
+  }
+  #printable-receipt {
+    position: fixed;
+    left: 0;
+    top: 0;
+    width: 100%;
+    max-width: 80mm;
+    padding: 8px;
+    background: #ffffff;
+    color: #000000;
+  }
+}
