@@ -1243,8 +1243,9 @@ async function processCheckout() {
   const netProfit = grandTotal - totalCost;
   const nowIso = new Date().toISOString();
 
+  const uniqueSuffix = Math.random().toString(36).slice(2, 4).toUpperCase();
   const newTx = {
-    id: "TRX-" + Date.now().toString().slice(-6),
+    id: `TRX-${Date.now().toString().slice(-6)}-${uniqueSuffix}`,
     timestamp: nowIso,
     cashierId: state.currentUser.id,
     cashierName: state.currentUser.name,
@@ -1268,22 +1269,25 @@ async function processCheckout() {
 
   try {
     await db.transaction("rw", db.products, db.transactions, db.debts, async () => {
-      // 1. Kurangi stok produk otomatis
+      // 1. Kurangi stok produk otomatis & tandai produk berubah
       for (const cartItem of state.cart) {
         const prod = await db.products.get(cartItem.productId);
         if (prod) {
           const updatedStock = Math.max(0, prod.stock - cartItem.qty);
           await db.products.update(prod.id, { stock: updatedStock });
+          markRecordDirty("products", prod.id);
         }
       }
 
-      // 2. Simpan transaksi beserta nama kasir bertugas
+      // 2. Simpan transaksi & tandai transaksi baru
       await db.transactions.add(newTx);
+      markRecordDirty("transactions", newTx.id);
 
-      // 3. Jika Kasbon/Hutang, catat ke tabel debts
+      // 3. Jika Kasbon/Hutang, catat ke tabel debts & tandai baru
       if (method === "debt") {
+        const newDebtId = `DBT-${Date.now().toString().slice(-6)}-${uniqueSuffix}`;
         await db.debts.add({
-          id: "DBT-" + Date.now().toString().slice(-6),
+          id: newDebtId,
           transactionId: newTx.id,
           customerName: customerName,
           customerPhone: customerPhone,
@@ -1293,8 +1297,10 @@ async function processCheckout() {
           status: "unpaid",
           cashierId: state.currentUser.id,
           cashierName: state.currentUser.name,
-          createdAt: nowIso
+          createdAt: nowIso,
+          paymentHistory: []
         });
+        markRecordDirty("debts", newDebtId);
       }
     });
 
@@ -1503,10 +1509,12 @@ async function saveProductForm(e) {
 
   if (id) {
     await db.products.update(id, { barcode, name, category, cost, price, stock, minStock });
+    markRecordDirty("products", id);
     showToast("Data barang berhasil diperbarui!", "success");
   } else {
+    const newProdId = "prd_" + Date.now() + "_" + Math.random().toString(36).slice(2, 5);
     await db.products.add({
-      id: "prd_" + Date.now(),
+      id: newProdId,
       barcode,
       name,
       category,
@@ -1515,6 +1523,7 @@ async function saveProductForm(e) {
       stock,
       minStock
     });
+    markRecordDirty("products", newProdId);
     showToast("Barang baru berhasil disimpan!", "success");
   }
 
@@ -1731,6 +1740,8 @@ async function confirmImportCsvData() {
             stock: row.stock,
             minStock: row.minStock
           });
+          markRecordDirty("products", existing.id);
+          const importedId = "prd_" + Date.now() + "_" + Math.random().toString(36).slice(2, 6);
           updatedCount++;
         } else {
           await db.products.add({
@@ -1743,6 +1754,7 @@ async function confirmImportCsvData() {
             stock: row.stock,
             minStock: row.minStock
           });
+          markRecordDirty("products", importedId);
           addedCount++;
         }
       }
@@ -2176,6 +2188,7 @@ async function handleConfirmVoidTransaction(e) {
         const prod = await db.products.get(item.productId);
         if (prod) {
           await db.products.update(prod.id, { stock: prod.stock + item.qty });
+          markRecordDirty("products", prod.id);
         }
       }
 
@@ -2186,6 +2199,7 @@ async function handleConfirmVoidTransaction(e) {
         voidedBy: authorizingAdmin.name,
         voidReason: reason
       });
+      markRecordDirty("transactions", tx.id);
 
       // 3. Jika transaksi ini adalah Kasbon, batalkan juga tagihan kasbonnya
       if (tx.paymentMethod === "debt") {
@@ -2195,6 +2209,7 @@ async function handleConfirmVoidTransaction(e) {
             status: "voided",
             remainingAmount: 0
           });
+          markRecordDirty("debts", linkedDebt.id);
         }
       }
     });
@@ -2390,6 +2405,7 @@ async function handleSaveDebtPayment(e) {
     status: newStatus,
     paymentHistory: history
   });
+  markRecordDirty("debts", debt.id);
 
   await refreshStateFromDB();
   scheduleCloudSync();
@@ -2418,6 +2434,8 @@ async function handleSaveManualDebt(e) {
   const phone = document.getElementById("manual-debt-phone").value.trim();
   const amount = Math.max(0, Number(document.getElementById("manual-debt-amount").value) || 0);
   const note = document.getElementById("manual-debt-note").value.trim();
+  const newManualDebtId = "DBT-" + Date.now().toString().slice(-6) + "-" + Math.random().toString(36).slice(2, 4).toUpperCase();
+  markRecordDirty("debts", newManualDebtId);
 
   if (!name || amount <= 0) return;
 
@@ -2719,6 +2737,7 @@ async function handleSaveReceiptSettings(e) {
   document.getElementById("header-store-name").textContent = state.receiptConfig.storeName;
   updateReceiptLivePreview();
   showToast("Desain & struktur struk berhasil disimpan!", "success");
+  markRecordDirty("settings", "receiptConfig");
 }
 
 // ============================================================================
@@ -3128,6 +3147,8 @@ async function handleAddAccount(e) {
   const pin = document.getElementById("new-acc-pin").value.trim();
   const role = document.getElementById("new-acc-role").value;
   const status = document.getElementById("new-acc-status").value;
+  const newUserId = "usr_" + Date.now() + "_" + Math.random().toString(36).slice(2, 5);
+  markRecordDirty("users", newUserId);
 
   if (!/^\d{4,6}$/.test(pin)) {
     showToast("PIN harus terdiri dari 4 sampai 6 angka!", "error");
@@ -3211,6 +3232,7 @@ async function handleSaveEditAccount(e) {
   closeEditAccountModal();
   renderSettingsView();
   showToast("Perubahan akun & PIN berhasil disimpan!", "success");
+  markRecordDirty("users", id);
 }
 
 async function toggleAccountStatus(user) {
@@ -3230,14 +3252,16 @@ async function toggleAccountStatus(user) {
         : `Akun "${user.name}" diaktifkan kembali.`,
       "success"
     );
+    markRecordDirty("users", user.id);
   }
 }
 
 // ============================================================================
-// 6B. MESIN SINKRONISASI HYBRID (INDEXEDDB OFFLINE + SUPABASE CLOUD)
+// 6B. MESIN SINKRONISASI HYBRID 2 ARAH (SMART MERGE ANTI-OVERWRITE)
 // ============================================================================
 const CLOUD_CONFIG_STORAGE_KEY = "pos_mm_cloud_config_v1";
 const CLOUD_DELETED_PRODUCTS_KEY = "pos_mm_deleted_products_v1";
+const CLOUD_DIRTY_QUEUE_KEY = "pos_mm_dirty_queue_v2";
 
 let cloudConfig = {
   supabaseUrl: "",
@@ -3248,6 +3272,69 @@ let cloudConfig = {
 
 let isSyncingNow = false;
 let autoSyncDebounceTimer = null;
+let periodicSyncInterval = null;
+
+function getEmptyDirtyQueue() {
+  return {
+    users: [],
+    products: [],
+    transactions: [],
+    debts: [],
+    settings: []
+  };
+}
+
+function loadDirtyQueue() {
+  try {
+    const raw = localStorage.getItem(CLOUD_DIRTY_QUEUE_KEY);
+    if (!raw) return getEmptyDirtyQueue();
+    return { ...getEmptyDirtyQueue(), ...JSON.parse(raw) };
+  } catch (e) {
+    return getEmptyDirtyQueue();
+  }
+}
+
+function saveDirtyQueue(queue) {
+  localStorage.setItem(CLOUD_DIRTY_QUEUE_KEY, JSON.stringify(queue));
+}
+
+// Tandai 1 baris data yang baru dibuat/diubah di perangkat ini agar dikirim ke Cloud
+function markRecordDirty(tableName, recordId) {
+  if (!recordId) return;
+  const queue = loadDirtyQueue();
+  if (!Array.isArray(queue[tableName])) queue[tableName] = [];
+  if (!queue[tableName].includes(recordId)) {
+    queue[tableName].push(recordId);
+    saveDirtyQueue(queue);
+  }
+}
+
+function removeRecordFromDirty(tableName, recordId) {
+  const queue = loadDirtyQueue();
+  if (!Array.isArray(queue[tableName])) return;
+  queue[tableName] = queue[tableName].filter((id) => id !== recordId);
+  saveDirtyQueue(queue);
+}
+
+// Tandai semua data lokal saat pertama kali menghubungkan Cloud yang masih kosong
+async function markAllLocalRecordsDirtyOnce() {
+  const queue = loadDirtyQueue();
+  const [users, products, transactions, debts, settings] = await Promise.all([
+    db.users.toArray(),
+    db.products.toArray(),
+    db.transactions.toArray(),
+    db.debts.toArray(),
+    db.settings.toArray()
+  ]);
+
+  users.forEach((u) => { if (!queue.users.includes(u.id)) queue.users.push(u.id); });
+  products.forEach((p) => { if (!queue.products.includes(p.id)) queue.products.push(p.id); });
+  transactions.forEach((t) => { if (!queue.transactions.includes(t.id)) queue.transactions.push(t.id); });
+  debts.forEach((d) => { if (!queue.debts.includes(d.id)) queue.debts.push(d.id); });
+  settings.forEach((s) => { if (!queue.settings.includes(s.key)) queue.settings.push(s.key); });
+
+  saveDirtyQueue(queue);
+}
 
 function loadCloudConfig() {
   try {
@@ -3308,12 +3395,13 @@ function updateCloudStatusUI() {
     badgeEl.textContent = "Cloud: Menunggu Internet";
     badgeEl.className = "px-3 py-1 rounded-full text-[11px] font-extrabold bg-amber-100 text-amber-800";
   } else {
-    badgeEl.textContent = "Cloud: Terhubung";
+    badgeEl.textContent = "Cloud: Terhubung (2-Arah)";
     badgeEl.className = "px-3 py-1 rounded-full text-[11px] font-extrabold bg-emerald-100 text-emerald-800";
   }
 }
 
 function trackDeletedProductId(productId) {
+  removeRecordFromDirty("products", productId);
   try {
     const raw = localStorage.getItem(CLOUD_DELETED_PRODUCTS_KEY);
     const list = raw ? JSON.parse(raw) : [];
@@ -3342,7 +3430,6 @@ function getSupabaseBaseUrl() {
   return cloudConfig.supabaseUrl.trim().replace(/\/+$/, "");
 }
 
-// Normalisasi kolom agar seluruh baris dalam batch memiliki struktur kunci yang seragam
 function normalizeRowsForSupabase(tableName, rows) {
   if (tableName === "users") {
     return rows.map((u) => ({
@@ -3433,6 +3520,18 @@ async function upsertTableToSupabase(tableName, rows) {
   }
 }
 
+async function fetchTableFromSupabase(tableName) {
+  const baseUrl = getSupabaseBaseUrl();
+  const res = await fetch(`${baseUrl}/rest/v1/${tableName}?select=*`, {
+    headers: getSupabaseHeaders(false)
+  });
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Gagal membaca tabel ${tableName}: ${res.status} ${errText}`);
+  }
+  return res.json();
+}
+
 async function flushDeletedProductsToSupabase() {
   const raw = localStorage.getItem(CLOUD_DELETED_PRODUCTS_KEY);
   const deletedIds = raw ? JSON.parse(raw) : [];
@@ -3456,7 +3555,118 @@ async function flushDeletedProductsToSupabase() {
   localStorage.setItem(CLOUD_DELETED_PRODUCTS_KEY, JSON.stringify(remaining));
 }
 
-// Kirim semua perubahan lokal ke Supabase (Push Sync)
+// Gabungkan data Cloud ke IndexedDB tanpa menimpa perubahan lokal yang belum terkirim
+async function pullAndMergeFromCloud() {
+  const [cloudUsers, cloudProducts, cloudTransactions, cloudDebts, cloudSettings] = await Promise.all([
+    fetchTableFromSupabase("users"),
+    fetchTableFromSupabase("products"),
+    fetchTableFromSupabase("transactions"),
+    fetchTableFromSupabase("debts"),
+    fetchTableFromSupabase("settings")
+  ]);
+
+  const dirtyNow = loadDirtyQueue();
+  const deletedProductIds = JSON.parse(localStorage.getItem(CLOUD_DELETED_PRODUCTS_KEY) || "[]");
+
+  await db.transaction("rw", db.users, db.products, db.transactions, db.debts, db.settings, async () => {
+    // 1. Gabung Akun Kasir (Users)
+    for (const cu of cloudUsers) {
+      if (!dirtyNow.users.includes(cu.id)) {
+        await db.users.put(cu);
+      }
+    }
+
+    // 2. Gabung Produk & Stok (Hanya timpa jika produk tidak sedang diubah lokal)
+    for (const cp of cloudProducts) {
+      if (!deletedProductIds.includes(cp.id) && !dirtyNow.products.includes(cp.id)) {
+        await db.products.put(cp);
+      }
+    }
+
+    // 3. Gabung Transaksi (Append-Only + Pertahankan status Retur/Void)
+    for (const ct of cloudTransactions) {
+      const localTx = await db.transactions.get(ct.id);
+      if (!localTx) {
+        await db.transactions.put(ct);
+      } else if (ct.status === "voided" && localTx.status !== "voided") {
+        await db.transactions.put(ct);
+      }
+    }
+
+    // 4. Gabung Kasbon & Cicilan (Gabung riwayat cicilan & hitung ulang sisa hutang)
+    for (const cd of cloudDebts) {
+      const localDebt = await db.debts.get(cd.id);
+      if (!localDebt) {
+        await db.debts.put(cd);
+      } else if (!dirtyNow.debts.includes(cd.id)) {
+        const localHist = Array.isArray(localDebt.paymentHistory) ? localDebt.paymentHistory : [];
+        const cloudHist = Array.isArray(cd.paymentHistory) ? cd.paymentHistory : [];
+        const mergedHistMap = new Map();
+
+        [...localHist, ...cloudHist].forEach((entry) => {
+          const key = `${entry.date}_${entry.amount}`;
+          mergedHistMap.set(key, entry);
+        });
+
+        const mergedHistory = Array.from(mergedHistMap.values());
+        const histPaidSum = mergedHistory.reduce((s, h) => s + (Number(h.amount) || 0), 0);
+        const totalAmt = Number(cd.totalAmount || localDebt.totalAmount) || 0;
+        const bestPaid = Math.min(
+          totalAmt,
+          Math.max(Number(localDebt.paidAmount) || 0, Number(cd.paidAmount) || 0, histPaidSum)
+        );
+        const remaining = Math.max(0, totalAmt - bestPaid);
+        const isVoided = localDebt.status === "voided" || cd.status === "voided";
+        const mergedStatus = isVoided
+          ? "voided"
+          : remaining === 0
+          ? "paid"
+          : bestPaid > 0
+          ? "partial"
+          : "unpaid";
+
+        await db.debts.put({
+          ...cd,
+          paidAmount: bestPaid,
+          remainingAmount: isVoided ? 0 : remaining,
+          status: mergedStatus,
+          paymentHistory: mergedHistory
+        });
+      }
+    }
+
+    // 5. Gabung Pengaturan Struk
+    for (const cs of cloudSettings) {
+      if (!dirtyNow.settings.includes(cs.key)) {
+        await db.settings.put(cs);
+      }
+    }
+  });
+
+  await refreshStateFromDB();
+  refreshActiveScreenAfterSync();
+}
+
+// Segarkan tampilan layar yang sedang dibuka kasir/admin setelah menerima data baru dari Cloud
+function refreshActiveScreenAfterSync() {
+  if (!state.currentUser) {
+    renderLoginScreen();
+    return;
+  }
+  applyRolePermissions();
+  if (state.activeTab === "kasir") {
+    populateKasirCategories();
+    renderKasirProducts();
+  } else if (state.activeTab === "produk") {
+    renderManageProducts();
+  } else if (state.activeTab === "riwayat") {
+    renderHistoryView();
+  } else if (state.activeTab === "kasbon") {
+    renderDebtsView();
+  }
+}
+
+// Sinkronisasi Penuh 2 Arah: (1) Kirim Perubahan Lokal -> (2) Tarik & Gabung Data Cloud
 async function syncAllToCloud(silent = true) {
   if (!isCloudConfigured() || !navigator.onLine || isSyncingNow) {
     updateCloudStatusUI();
@@ -3467,27 +3677,55 @@ async function syncAllToCloud(silent = true) {
   updateCloudStatusUI();
 
   try {
+    // Jika belum pernah sinkronisasi sama sekali, tandai data lokal awal agar ikut terunggah
+    if (!cloudConfig.lastSyncAt) {
+      await markAllLocalRecordsDirtyOnce();
+    }
+
+    // TAHAP 1 (PUSH): Kirim hanya data yang berubah/baru di perangkat ini
     await flushDeletedProductsToSupabase();
+    const queue = loadDirtyQueue();
 
-    const [users, products, transactions, debts, settings] = await Promise.all([
-      db.users.toArray(),
-      db.products.toArray(),
-      db.transactions.toArray(),
-      db.debts.toArray(),
-      db.settings.toArray()
-    ]);
+    if (queue.users.length > 0) {
+      const dirtyUsers = (await db.users.bulkGet(queue.users)).filter(Boolean);
+      await upsertTableToSupabase("users", dirtyUsers);
+      queue.users = [];
+    }
 
-    await upsertTableToSupabase("users", users);
-    await upsertTableToSupabase("products", products);
-    await upsertTableToSupabase("transactions", transactions);
-    await upsertTableToSupabase("debts", debts);
-    await upsertTableToSupabase("settings", settings);
+    if (queue.products.length > 0) {
+      const dirtyProducts = (await db.products.bulkGet(queue.products)).filter(Boolean);
+      await upsertTableToSupabase("products", dirtyProducts);
+      queue.products = [];
+    }
+
+    if (queue.transactions.length > 0) {
+      const dirtyTx = (await db.transactions.bulkGet(queue.transactions)).filter(Boolean);
+      await upsertTableToSupabase("transactions", dirtyTx);
+      queue.transactions = [];
+    }
+
+    if (queue.debts.length > 0) {
+      const dirtyDebts = (await db.debts.bulkGet(queue.debts)).filter(Boolean);
+      await upsertTableToSupabase("debts", dirtyDebts);
+      queue.debts = [];
+    }
+
+    if (queue.settings.length > 0) {
+      const dirtySettings = (await db.settings.bulkGet(queue.settings)).filter(Boolean);
+      await upsertTableToSupabase("settings", dirtySettings);
+      queue.settings = [];
+    }
+
+    saveDirtyQueue(queue);
+
+    // TAHAP 2 (PULL & MERGE): Unduh & gabungkan data terbaru dari perangkat lain
+    await pullAndMergeFromCloud();
 
     cloudConfig.lastSyncAt = new Date().toISOString();
     saveCloudConfigToStorage();
 
     if (!silent) {
-      showToast("Sinkronisasi ke Cloud Supabase berhasil!", "success");
+      showToast("Sinkronisasi 2-arah dengan Cloud berhasil!", "success");
     }
     return true;
   } catch (err) {
@@ -3502,16 +3740,15 @@ async function syncAllToCloud(silent = true) {
   }
 }
 
-// Jadwalkan sinkronisasi latar belakang tanpa menghambat kecepatan kasir
 function scheduleCloudSync() {
   if (!isCloudConfigured() || !cloudConfig.autoSync) return;
   clearTimeout(autoSyncDebounceTimer);
   autoSyncDebounceTimer = setTimeout(() => {
     syncAllToCloud(true);
-  }, 1200);
+  }, 1000);
 }
 
-// Pulihkan / Unduh seluruh data dari Supabase ke IndexedDB perangkat ini
+// Pulihkan / Unduh seluruh data dari Supabase ke IndexedDB perangkat baru
 async function restoreAllDataFromCloud() {
   if (!isCloudConfigured()) {
     showToast("Masukkan URL dan Anon Key Supabase terlebih dahulu!", "error");
@@ -3524,7 +3761,7 @@ async function restoreAllDataFromCloud() {
 
   if (
     !confirm(
-      "Pulihkan seluruh data dari Cloud Supabase? Data di perangkat ini akan diselaraskan dengan data terbaru dari Cloud."
+      "Pulihkan & gabungkan seluruh data dari Cloud Supabase ke perangkat ini?"
     )
   ) {
     return;
@@ -3532,40 +3769,10 @@ async function restoreAllDataFromCloud() {
 
   isSyncingNow = true;
   updateCloudStatusUI();
-  showToast("Mengunduh data dari Cloud Supabase...", "info");
+  showToast("Mengunduh & menggabungkan data dari Cloud...", "info");
 
   try {
-    const baseUrl = getSupabaseBaseUrl();
-    const headers = getSupabaseHeaders(false);
-
-    const fetchTable = async (tableName) => {
-      const res = await fetch(`${baseUrl}/rest/v1/${tableName}?select=*`, { headers });
-      if (!res.ok) {
-        const msg = await res.text();
-        throw new Error(`Gagal mengunduh ${tableName}: ${res.status} ${msg}`);
-      }
-      return res.json();
-    };
-
-    const [cloudUsers, cloudProducts, cloudTransactions, cloudDebts, cloudSettings] = await Promise.all([
-      fetchTable("users"),
-      fetchTable("products"),
-      fetchTable("transactions"),
-      fetchTable("debts"),
-      fetchTable("settings")
-    ]);
-
-    await db.transaction("rw", db.users, db.products, db.transactions, db.debts, db.settings, async () => {
-      if (cloudUsers.length > 0) await db.users.bulkPut(cloudUsers);
-      if (cloudProducts.length > 0) await db.products.bulkPut(cloudProducts);
-      if (cloudTransactions.length > 0) await db.transactions.bulkPut(cloudTransactions);
-      if (cloudDebts.length > 0) await db.debts.bulkPut(cloudDebts);
-      if (cloudSettings.length > 0) await db.settings.bulkPut(cloudSettings);
-    });
-
-    await refreshStateFromDB();
-    applyRolePermissions();
-
+    await pullAndMergeFromCloud();
     cloudConfig.lastSyncAt = new Date().toISOString();
     saveCloudConfigToStorage();
     showToast("Seluruh data berhasil dipulihkan dari Cloud!", "success");
@@ -3776,6 +3983,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
   window.addEventListener("offline", updateCloudStatusUI);
+  
+  // Tarik & gabungkan data terbaru dari perangkat lain secara berkala setiap 30 detik
+  if (isCloudConfigured() && cloudConfig.autoSync && navigator.onLine) {
+    syncAllToCloud(true);
+  }
+  periodicSyncInterval = setInterval(() => {
+    if (isCloudConfigured() && cloudConfig.autoSync && navigator.onLine) {
+      syncAllToCloud(true);
+    }
+  }, 30000);
 
   // Manajemen Akun Kasir (Admin)
   document.getElementById("form-add-account").addEventListener("submit", handleAddAccount);
