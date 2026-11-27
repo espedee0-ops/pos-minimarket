@@ -507,7 +507,8 @@ function isAnyModalOpen() {
     "modal-tx-detail",
     "modal-void-auth",
     "modal-debt-payment",
-    "modal-add-manual-debt"
+    "modal-add-manual-debt",
+    "modal-export-report"
   ];
   return modalIds.some((id) => {
     const el = document.getElementById(id);
@@ -2060,6 +2061,297 @@ function renderHistoryView() {
 
     listEl.appendChild(card);
   });
+}
+
+// ============================================================================
+// EKSPOR LAPORAN TRANSAKSI, OMZET, & LABA KE CSV / EXCEL (RENTANG TANGGAL)
+// ============================================================================
+function toLocalDateInputString(dateObj) {
+  const y = dateObj.getFullYear();
+  const m = String(dateObj.getMonth() + 1).padStart(2, "0");
+  const d = String(dateObj.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function applyExportDatePreset(preset) {
+  const now = new Date();
+  const startInput = document.getElementById("export-date-start");
+  const endInput = document.getElementById("export-date-end");
+
+  if (preset === "TODAY") {
+    const today = toLocalDateInputString(now);
+    startInput.value = today;
+    endInput.value = today;
+  } else if (preset === "YESTERDAY") {
+    const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+    const yStr = toLocalDateInputString(yesterday);
+    startInput.value = yStr;
+    endInput.value = yStr;
+  } else if (preset === "THIS_MONTH") {
+    const firstDay = new Date(now.getFullYear(), now.getMonth(), 1);
+    startInput.value = toLocalDateInputString(firstDay);
+    endInput.value = toLocalDateInputString(now);
+  } else if (preset === "ALL") {
+    startInput.value = "";
+    endInput.value = "";
+  }
+
+  updateExportReportPreview();
+}
+
+function openExportReportModal() {
+  const isAdmin = state.currentUser && state.currentUser.role === "admin";
+  const cashierWrapper = document.getElementById("export-cashier-wrapper");
+  const cashierSelect = document.getElementById("export-cashier-select");
+
+  if (isAdmin) {
+    cashierWrapper.classList.remove("hidden");
+    const currentFilter = document.getElementById("riwayat-cashier-filter").value || "ALL";
+    cashierSelect.innerHTML = `<option value="ALL">Semua Kasir (Aktif &amp; Nonaktif)</option>`;
+    state.users.forEach((u) => {
+      const opt = document.createElement("option");
+      opt.value = u.id;
+      opt.textContent = u.status === "inactive" ? `${u.name} (Nonaktif)` : u.name;
+      cashierSelect.appendChild(opt);
+    });
+    cashierSelect.value = currentFilter;
+  } else {
+    cashierWrapper.classList.add("hidden");
+  }
+
+  // Selaraskan tanggal awal modal ekspor dengan filter yang sedang aktif di halaman Laporan
+  if (riwayatPeriodFilter === "CUSTOM") {
+    document.getElementById("export-date-start").value = document.getElementById("riwayat-date-start").value || "";
+    document.getElementById("export-date-end").value = document.getElementById("riwayat-date-end").value || "";
+  } else {
+    applyExportDatePreset(riwayatPeriodFilter);
+  }
+
+  updateExportReportPreview();
+  document.getElementById("modal-export-report").classList.remove("hidden");
+}
+
+function closeExportReportModal() {
+  document.getElementById("modal-export-report").classList.add("hidden");
+}
+
+function getFilteredTransactionsForExport() {
+  const isAdmin = state.currentUser && state.currentUser.role === "admin";
+  const startVal = document.getElementById("export-date-start").value;
+  const endVal = document.getElementById("export-date-end").value;
+  const selectedCashier = isAdmin
+    ? document.getElementById("export-cashier-select").value
+    : state.currentUser.id;
+
+  let startBound = null;
+  let endBound = null;
+
+  if (startVal) {
+    const [sy, sm, sd] = startVal.split("-").map(Number);
+    startBound = new Date(sy, sm - 1, sd, 0, 0, 0, 0);
+  }
+  if (endVal) {
+    const [ey, em, ed] = endVal.split("-").map(Number);
+    endBound = new Date(ey, em - 1, ed, 23, 59, 59, 999);
+  }
+
+  const matched = state.transactions
+    .filter((tx) => {
+      if (selectedCashier !== "ALL" && tx.cashierId !== selectedCashier) return false;
+      const txDate = new Date(tx.timestamp);
+      if (startBound && txDate < startBound) return false;
+      if (endBound && txDate > endBound) return false;
+      return true;
+    })
+    .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+  return { matched, startVal, endVal, selectedCashier, isAdmin };
+}
+
+function updateExportReportPreview() {
+  const { matched, isAdmin } = getFilteredTransactionsForExport();
+  const validTx = matched.filter((t) => t.status !== "voided");
+  const voidCount = matched.length - validTx.length;
+
+  const totalOmzet = validTx.reduce((s, t) => s + (Number(t.totalAmount) || 0), 0);
+  const totalLaba = validTx.reduce((s, t) => s + (Number(t.netProfit) || 0), 0);
+
+  const countEl = document.getElementById("export-preview-count");
+  const totalsEl = document.getElementById("export-preview-totals");
+  const submitBtn = document.getElementById("btn-confirm-export-report");
+
+  if (matched.length === 0) {
+    countEl.textContent = "Tidak ada transaksi pada rentang tanggal ini.";
+    totalsEl.textContent = "Silakan ubah tanggal mulai atau tanggal akhir.";
+    submitBtn.disabled = true;
+    submitBtn.classList.add("opacity-50");
+    return;
+  }
+
+  submitBtn.disabled = false;
+  submitBtn.classList.remove("opacity-50");
+  countEl.textContent = `Ditemukan ${validTx.length} transaksi valid${voidCount > 0 ? ` (${voidCount} retur)` : ""}`;
+  totalsEl.textContent = isAdmin
+    ? `Total Omzet: ${formatRupiah(totalOmzet)} | Laba Bersih: ${formatRupiah(totalLaba)}`
+    : `Total Penjualan: ${formatRupiah(totalOmzet)}`;
+}
+
+function handleExportReportSubmit(e) {
+  e.preventDefault();
+  const { matched, startVal, endVal, selectedCashier, isAdmin } = getFilteredTransactionsForExport();
+
+  if (matched.length === 0) {
+    showToast("Tidak ada transaksi untuk diekspor pada tanggal tersebut.", "error");
+    return;
+  }
+
+  const validTx = matched.filter((t) => t.status !== "voided");
+  const voidedTx = matched.filter((t) => t.status === "voided");
+
+  const totalOmzet = validTx.reduce((s, t) => s + (Number(t.totalAmount) || 0), 0);
+  const totalModal = validTx.reduce((s, t) => s + (Number(t.totalCost) || 0), 0);
+  const totalLaba = validTx.reduce((s, t) => s + (Number(t.netProfit) || 0), 0);
+  const totalDiskon = validTx.reduce((s, t) => {
+    const itemDisc = (t.items || []).reduce((acc, it) => acc + (Number(it.itemDiscountAmount) || 0), 0);
+    return s + itemDisc + (Number(t.cartDiscountAmount) || 0);
+  }, 0);
+
+  const totalTunai = validTx
+    .filter((t) => (t.paymentMethod || "cash") === "cash")
+    .reduce((s, t) => s + (Number(t.totalAmount) || 0), 0);
+  const totalNonTunai = validTx
+    .filter((t) => t.paymentMethod === "non-cash")
+    .reduce((s, t) => s + (Number(t.totalAmount) || 0), 0);
+  const totalKasbon = validTx
+    .filter((t) => t.paymentMethod === "debt")
+    .reduce((s, t) => s + (Number(t.totalAmount) || 0), 0);
+
+  const periodeLabel =
+    startVal && endVal
+      ? `${startVal} s/d ${endVal}`
+      : startVal
+      ? `Mulai ${startVal}`
+      : endVal
+      ? `Sampai ${endVal}`
+      : "Semua Waktu";
+
+  let kasirLabel = "Semua Kasir";
+  if (!isAdmin) {
+    kasirLabel = state.currentUser.name;
+  } else if (selectedCashier !== "ALL") {
+    const foundUser = state.users.find((u) => u.id === selectedCashier);
+    kasirLabel = foundUser ? foundUser.name : selectedCashier;
+  }
+
+  const csvLines = [];
+
+  // BLOK 1: RINGKASAN LAPORAN KEUANGAN
+  csvLines.push([escapeCsvCell(`LAPORAN TRANSAKSI - ${(state.receiptConfig.storeName || "MINIMARKET").toUpperCase()}`)]);
+  csvLines.push(["Periode Laporan", escapeCsvCell(periodeLabel)]);
+  csvLines.push(["Filter Kasir", escapeCsvCell(kasirLabel)]);
+  csvLines.push(["Diekspor Oleh", escapeCsvCell(`${state.currentUser.name} (${state.currentUser.role.toUpperCase()})`)]);
+  csvLines.push(["Waktu Ekspor", escapeCsvCell(new Date().toLocaleString("id-ID"))]);
+  csvLines.push([]);
+  csvLines.push(["RINGKASAN KEUANGAN", "NILAI"]);
+  csvLines.push(["Jumlah Transaksi Valid", validTx.length]);
+  csvLines.push(["Jumlah Transaksi Batal / Retur", voidedTx.length]);
+  csvLines.push(["Total Pembayaran Tunai", totalTunai]);
+  csvLines.push(["Total Pembayaran Non-Tunai (QRIS/Transfer)", totalNonTunai]);
+  csvLines.push(["Total Transaksi Kasbon / Hutang", totalKasbon]);
+  csvLines.push(["Total Diskon Diberikan", totalDiskon]);
+  csvLines.push(["TOTAL OMZET (PENJUALAN BERSIH)", totalOmzet]);
+
+  if (isAdmin) {
+    csvLines.push(["TOTAL MODAL (HPP)", totalModal]);
+    csvLines.push(["TOTAL LABA BERSIH", totalLaba]);
+  }
+
+  csvLines.push([]);
+
+  // BLOK 2: TABEL RINCIAN TRANSAKSI
+  const tableHeaders = [
+    "No. Nota",
+    "Tanggal & Waktu",
+    "Kasir",
+    "Pelanggan",
+    "Metode Pembayaran",
+    "Status",
+    "Rincian Barang",
+    "Subtotal Kotor",
+    "Total Diskon",
+    "Total Omzet"
+  ];
+  if (isAdmin) {
+    tableHeaders.push("Total Modal (HPP)", "Laba Bersih");
+  }
+  csvLines.push(tableHeaders.join(","));
+
+  matched.forEach((tx) => {
+    const isVoided = tx.status === "voided";
+    const dtStr = new Date(tx.timestamp).toLocaleString("id-ID");
+    const methodLabel =
+      tx.paymentMethod === "non-cash"
+        ? "QRIS / Transfer"
+        : tx.paymentMethod === "debt"
+        ? "Kasbon / Hutang"
+        : "Tunai";
+    const statusLabel = isVoided ? `DIBATALKAN / RETUR (${tx.voidReason || "-"})` : "SELESAI";
+
+    const itemsSummary = (tx.items || [])
+      .map((it) => `${it.name} (${it.qty}x @${it.price})`)
+      .join("; ");
+
+    const itemDiscSum = (tx.items || []).reduce((acc, it) => acc + (Number(it.itemDiscountAmount) || 0), 0);
+    const totalTxDiscount = itemDiscSum + (Number(tx.cartDiscountAmount) || 0);
+    const grossSubtotal = (Number(tx.totalAmount) || 0) + totalTxDiscount;
+
+    // Jika transaksi dibatalkan/retur, isi angka keuangan 0 agar rumus =SUM() di Excel akurat
+    const rowCols = [
+      escapeCsvCell(tx.id),
+      escapeCsvCell(dtStr),
+      escapeCsvCell(tx.cashierName || ""),
+      escapeCsvCell(tx.customerName || "-"),
+      escapeCsvCell(methodLabel),
+      escapeCsvCell(statusLabel),
+      escapeCsvCell(
+        isVoided
+          ? `${itemsSummary} [Nilai Batal: ${formatRupiah(tx.totalAmount)}]`
+          : itemsSummary
+      ),
+      isVoided ? 0 : grossSubtotal,
+      isVoided ? 0 : totalTxDiscount,
+      isVoided ? 0 : Number(tx.totalAmount) || 0
+    ];
+
+    if (isAdmin) {
+      rowCols.push(isVoided ? 0 : Number(tx.totalCost) || 0);
+      rowCols.push(isVoided ? 0 : Number(tx.netProfit) || 0);
+    }
+
+    csvLines.push(rowCols.join(","));
+  });
+
+  // Format baris ringkasan menjadi string CSV valid
+  const formattedLines = csvLines.map((line) => (Array.isArray(line) ? line.join(",") : line));
+  const csvContent = "\uFEFF" + formattedLines.join("\n");
+  const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+
+  const fileRangeTag =
+    startVal && endVal
+      ? `${startVal}_sd_${endVal}`
+      : startVal || endVal || new Date().toISOString().slice(0, 10);
+
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `laporan-transaksi-${fileRangeTag}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+
+  closeExportReportModal();
+  showToast(`Laporan (${validTx.length} transaksi) berhasil diunduh!`, "success");
 }
 
 // ============================================================================
@@ -3924,6 +4216,17 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("riwayat-date-start").addEventListener("change", renderHistoryView);
   document.getElementById("riwayat-date-end").addEventListener("change", renderHistoryView);
   document.getElementById("btn-jump-to-kasbon").addEventListener("click", () => switchTab("kasbon"));
+  // Ekspor Laporan Transaksi & Laba (Rentang Tanggal)
+  document.getElementById("btn-open-export-report").addEventListener("click", openExportReportModal);
+  document.getElementById("btn-close-export-report").addEventListener("click", closeExportReportModal);
+  document.getElementById("btn-cancel-export-report").addEventListener("click", closeExportReportModal);
+  document.querySelectorAll(".export-preset-btn").forEach((btn) => {
+    btn.addEventListener("click", () => applyExportDatePreset(btn.dataset.exportPreset));
+  });
+  document.getElementById("export-date-start").addEventListener("change", updateExportReportPreview);
+  document.getElementById("export-date-end").addEventListener("change", updateExportReportPreview);
+  document.getElementById("export-cashier-select").addEventListener("change", updateExportReportPreview);
+  document.getElementById("form-export-report").addEventListener("submit", handleExportReportSubmit);
 
   // Modal Detail Transaksi & Retur
   document.getElementById("btn-close-tx-detail").addEventListener("click", closeTxDetailModal);
